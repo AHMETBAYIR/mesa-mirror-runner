@@ -38,12 +38,18 @@ jobs:
           if [ -f mirror.git/HEAD ]; then
             echo "Existing mirror found, fetching incrementally..."
             git --git-dir=mirror.git remote set-url origin "$UPSTREAM"
-            git --git-dir=mirror.git fetch --prune origin "+refs/*:refs/*"
+            git --git-dir=mirror.git fetch --prune origin \
+              "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"
           else
             echo "No cached mirror, doing a fresh full clone (first run only)..."
             git clone --mirror "$UPSTREAM" mirror.git
           fi
           git --git-dir=mirror.git rev-parse HEAD || true
+          # GitLab exposes refs/merge-requests/* (and other internal namespaces)
+          # that GitHub reserves and rejects on push — keep only branches+tags.
+          git --git-dir=mirror.git for-each-ref --format='%(refname)' \
+            | awk '!/^refs\/(heads|tags)\//' \
+            | xargs -r -n 20 git --git-dir=mirror.git update-ref -d
           # Tags GitHub persistently rejects (ancient pre-2008 CVS-era tags with
           # broken/unreachable history — GitHub answers HTTP 500 for them). They
           # are dropped locally right after fetch so one-shot --mirror pushes
@@ -199,15 +205,15 @@ jobs:
               else
                 echo "::warning::GitHub keeps rejecting $r — skipping permanently"
                 git update-ref -d "$r" 2>/dev/null || true
-                echo "$r" >> mirror.git/skipped_tags.txt
+                echo "$r" >> skipped_tags.txt
               fi
             done < "$f"
           done
           rm -f /tmp/tagbatch_*
-          sort -u mirror.git/skipped_tags.txt -o mirror.git/skipped_tags.txt
-          count=$(wc -l < mirror.git/skipped_tags.txt)
+          sort -u skipped_tags.txt -o skipped_tags.txt
+          count=$(wc -l < skipped_tags.txt)
           if [ "$count" -gt 0 ]; then
-            echo "::notice::$count tag(s) permanently skipped (GitHub rejects them): $(paste -sd, mirror.git/skipped_tags.txt)"
+            echo "::notice::$count tag(s) permanently skipped (GitHub rejects them): $(paste -sd, skipped_tags.txt)"
           fi
 
           # 4) Final prune pass: drop refs deleted upstream (best-effort; the
