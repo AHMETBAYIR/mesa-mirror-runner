@@ -7,13 +7,16 @@ on:
   # Allows manual trigger from the Actions tab
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 # Never run two mirror jobs at once (avoids races on cache save)
 concurrency:
   group: mesa-mirror
   cancel-in-progress: false
+
+env:
+  # The repo that receives the full mirror (default branch there = mesa's main)
+  MIRROR_REPO: AHMETBAYIR/mesa-mirror
+  # Upstream source
+  UPSTREAM: https://gitlab.freedesktop.org/mesa/mesa.git
 
 jobs:
   mirror:
@@ -30,8 +33,6 @@ jobs:
             mesa-mirror-
 
       - name: Clone or incrementally update the mirror
-        env:
-          UPSTREAM: https://gitlab.freedesktop.org/mesa/mesa.git
         run: |
           set -euo pipefail
           if [ -d mirror.git ]; then
@@ -48,7 +49,7 @@ jobs:
         env:
           # MIRROR_TOKEN needs the `workflow` scope because mesa's history
           # contains .github/workflows/*.yml files (GITHUB_TOKEN can't push those).
-          URL: https://x-access-token:${{ secrets.MIRROR_TOKEN }}@github.com/${{ github.repository }}.git
+          URL: https://x-access-token:${{ secrets.MIRROR_TOKEN }}@github.com/${{ env.MIRROR_REPO }}.git
         run: |
           set -euo pipefail
           cd mirror.git
@@ -86,11 +87,12 @@ jobs:
           GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
         run: |
           set -euo pipefail
-          REPO="${{ github.repository }}"
+          REPO="${{ env.MIRROR_REPO }}"
           # Mesa's workflows (e.g. macos.yml, on: push) would run pointlessly on
-          # every sync. Disable everything except our own mirror.yml.
+          # every sync. Disable everything except nothing — this runner repo has
+          # its own workflow; the mirror repo should run no workflows at all.
           gh api "repos/$REPO/actions/workflows" --paginate \
-            --jq '.workflows[] | select(.path != ".github/workflows/mirror.yml") | .id' \
+            --jq '.workflows[] | .id' \
             | while read -r id; do
                 echo "Disabling workflow id $id"
                 gh api -X PUT "repos/$REPO/actions/workflows/$id/disable" || true
