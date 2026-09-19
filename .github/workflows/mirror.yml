@@ -25,7 +25,7 @@ jobs:
     steps:
       - name: Restore cached bare mirror (if any)
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: mirror.git
           key: mesa-mirror-${{ github.run_id }}
@@ -35,7 +35,7 @@ jobs:
       - name: Clone or incrementally update the mirror
         run: |
           set -euo pipefail
-          if [ -d mirror.git ]; then
+          if [ -f mirror.git/HEAD ]; then
             echo "Existing mirror found, fetching incrementally..."
             git --git-dir=mirror.git remote set-url origin "$UPSTREAM"
             git --git-dir=mirror.git fetch --prune origin "+refs/*:refs/*"
@@ -57,14 +57,30 @@ jobs:
           git config http.postBuffer 2147483648
           git config http.version HTTP/1.1
 
-          # --mirror pushes all refs (branches + tags) and prunes deleted upstream refs;
-          # it also force-updates, so divergent history can never block the sync.
+          # Retry transient GitHub 408/500 errors
+          push_with_retry() {
+            local attempt=1
+            until git push --force "$URL" "$@"; do
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::push failed after 3 attempts: $*"
+                return 1
+              fi
+              attempt=$(( attempt + 1 ))
+              echo "Retrying in 15s (attempt $attempt)..."
+              sleep 15
+            done
+          }
+
+          # --mirror pushes all refs (branches + tags) and prunes deleted upstream
+          # refs; it also force-updates. Succeeds quickly once everything exists.
           if git push --mirror "$URL"; then
             echo "Full mirror push succeeded"
             exit 0
           fi
 
-          echo "::notice::One-shot push failed (initial history is ~2 GB) — falling back to chunked push"
+          echo "::notice::One-shot push failed — falling back to batched push"
+          echo "(needed only during the first-ever sync; later daily syncs are small)"
+
           # 1) Push main's history in slices so no single HTTP request is huge.
           mapfile -t commits < <(git rev-list --reverse main)
           total=${#commits[@]}
@@ -74,13 +90,33 @@ jobs:
             end=$(( i + chunk - 1 ))
             [ "$end" -ge "$total" ] && end=$(( total - 1 ))
             echo "Pushing commits $((i+1))..$((end+1)) of $total"
-            git push --force "$URL" "+${commits[$end]}:refs/heads/main"
+            push_with_retry "+${commits[$end]}:refs/heads/main"
             i=$(( i + chunk ))
           done
-          # 2) main is now complete on GitHub; push remaining refs (tags, other
-          #    branches) — incremental and small since history already exists.
-          git push --mirror "$URL"
-          echo "Chunked push complete"
+
+          # 2) Push every other branch individually (old release branches carry
+          #    unique backport history not reachable from main).
+          git for-each-ref --format='%(refname)' refs/heads | while read -r r; do
+            [ "$r" = "refs/heads/main" ] && continue
+            echo "Pushing branch $r"
+            push_with_retry "+$r:$r"
+          done
+
+          # 3) Push tags in batches of 100 (952 tags in one request is too much).
+          git for-each-ref --format='%(refname)' refs/tags > /tmp/tags.txt
+          split -l 100 /tmp/tags.txt /tmp/tagbatch_
+          for f in /tmp/tagbatch_*; do
+            refs=()
+            while read -r r; do refs+=("+$r:$r"); done < "$f"
+            echo "Pushing batch $f (${#refs[@]} tags)"
+            push_with_retry "${refs[@]}"
+          done
+          rm -f /tmp/tagbatch_*
+
+          # 4) Final prune pass: drop refs deleted upstream (best-effort; the
+          #    next daily run's one-shot push prunes anyway).
+          git push --mirror "$URL" || echo "::warning::prune pass skipped for now"
+          echo "Batched push complete"
 
       - name: Disable upstream CI workflows in the mirror
         env:
@@ -89,11 +125,17 @@ jobs:
           set -euo pipefail
           REPO="${{ env.MIRROR_REPO }}"
           # Mesa's workflows (e.g. macos.yml, on: push) would run pointlessly on
-          # every sync. Disable everything except nothing — this runner repo has
-          # its own workflow; the mirror repo should run no workflows at all.
+          # every sync. The mirror repo should run no workflows at all.
           gh api "repos/$REPO/actions/workflows" --paginate \
             --jq '.workflows[] | .id' \
             | while read -r id; do
                 echo "Disabling workflow id $id"
                 gh api -X PUT "repos/$REPO/actions/workflows/$id/disable" || true
               done
+
+      - name: Save mirror to cache
+        if: always() && hashFiles('mirror.git/HEAD') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: mirror.git
+          key: mesa-mirror-${{ github.run_id }}
