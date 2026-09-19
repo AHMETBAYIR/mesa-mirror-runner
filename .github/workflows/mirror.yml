@@ -45,10 +45,36 @@ jobs:
           git --git-dir=mirror.git rev-parse HEAD || true
 
       - name: Push all refs to GitHub
+        env:
+          URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
         run: |
           set -euo pipefail
           cd mirror.git
+          # Buffer large packs in memory and avoid flaky HTTP/2 handling for big pushes
+          git config http.postBuffer 2147483648
+          git config http.version HTTP/1.1
+
           # --mirror pushes all refs (branches + tags) and prunes deleted upstream refs;
           # it also force-updates, so divergent history can never block the sync.
-          git push --mirror \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git push --mirror "$URL"; then
+            echo "Full mirror push succeeded"
+            exit 0
+          fi
+
+          echo "::notice::One-shot push failed (initial history is ~2 GB) — falling back to chunked push"
+          # 1) Push main's history in slices so no single HTTP request is huge.
+          mapfile -t commits < <(git rev-list --reverse main)
+          total=${#commits[@]}
+          chunk=5000
+          i=0
+          while [ "$i" -lt "$total" ]; do
+            end=$(( i + chunk - 1 ))
+            [ "$end" -ge "$total" ] && end=$(( total - 1 ))
+            echo "Pushing commits $((i+1))..$((end+1)) of $total"
+            git push --force "$URL" "+${commits[$end]}:refs/heads/main"
+            i=$(( i + chunk ))
+          done
+          # 2) main is now complete on GitHub; push remaining refs (tags, other
+          #    branches) — incremental and small since history already exists.
+          git push --mirror "$URL"
+          echo "Chunked push complete"
