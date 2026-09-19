@@ -44,6 +44,83 @@ jobs:
             git clone --mirror "$UPSTREAM" mirror.git
           fi
           git --git-dir=mirror.git rev-parse HEAD || true
+          # Tags GitHub persistently rejects (ancient pre-2008 CVS-era tags with
+          # broken/unreachable history — GitHub answers HTTP 500 for them). They
+          # are dropped locally right after fetch so one-shot --mirror pushes
+          # stay small and daily syncs stay fast.
+          if [ ! -f mirror.git/skipped_tags.txt ]; then
+            cat > mirror.git/skipped_tags.txt <<'EOF'
+refs/tags/R300_DRIVER_0
+refs/tags/before_upgrade_03_01_05
+refs/tags/blended_fountain
+refs/tags/embedded-1-20030120
+refs/tags/embedded-1-20030224
+refs/tags/embedded-1-20030305
+refs/tags/embedded-1-20030324
+refs/tags/embedded-1-20030417
+refs/tags/embedded-1-20030502
+refs/tags/gliding_penguin
+refs/tags/jump_and_click
+refs/tags/kw-mesa-1
+refs/tags/mesa-6_5-20060712
+refs/tags/mesa_20050504
+refs/tags/mesa_20050526
+refs/tags/mesa_20050610
+refs/tags/mesa_20050715
+refs/tags/mesa_20060201
+refs/tags/mesa_20060325
+refs/tags/mesa_3_1
+refs/tags/mesa_3_1_beta_3
+refs/tags/mesa_3_2
+refs/tags/mesa_3_2_1
+refs/tags/mesa_3_2_beta_1
+refs/tags/mesa_3_3
+refs/tags/mesa_3_4
+refs/tags/mesa_3_4_1
+refs/tags/mesa_3_4_2
+refs/tags/mesa_3_5
+refs/tags/mesa_4_0
+refs/tags/mesa_4_0_1
+refs/tags/mesa_4_0_2
+refs/tags/mesa_4_0_3
+refs/tags/mesa_4_0_4
+refs/tags/mesa_4_1
+refs/tags/mesa_5_0
+refs/tags/mesa_5_0_1
+refs/tags/mesa_6_3
+refs/tags/mesa_6_3_1
+refs/tags/mesa_6_3_1_1
+refs/tags/mesa_6_3_2
+refs/tags/mesa_6_4
+refs/tags/mesa_6_4_1
+refs/tags/mesa_6_4_2
+refs/tags/mesa_6_5
+refs/tags/mesa_6_5_1
+refs/tags/mesa_6_5_2
+refs/tags/mesa_texman_20060210
+refs/tags/noisy_cube
+refs/tags/red_tinted_cube
+refs/tags/rotating_gears
+refs/tags/shimmering_gears
+refs/tags/start
+refs/tags/texman_0_1_20060325
+refs/tags/texman_0_1_20060330
+refs/tags/texman_0_1_20060621
+refs/tags/texman_0_1_20060705
+refs/tags/texman_0_1_pre_ttm
+refs/tags/texmem_0_2_20060912
+refs/tags/texmem_0_3_20060923
+refs/tags/texmem_0_3_20060929
+refs/tags/the_perfect_frag
+refs/tags/trunk_20040329
+refs/tags/unichrome-last-xinerama
+refs/tags/vtx-0-2-21112003-freeze
+refs/tags/vtx-0-2-24112003
+EOF
+          fi
+          while read -r t; do
+            git --git-dir=mirror.git update-ref -d "$t" 2>/dev/null || true
+          done < mirror.git/skipped_tags.txt
 
       - name: Push all refs to GitHub
         env:
@@ -117,15 +194,17 @@ jobs:
               if push_with_retry "+$r:$r"; then
                 echo "Pushed $r"
               else
-                echo "::warning::GitHub keeps rejecting $r — skipping (mirror will be missing this one tag)"
-                echo "$r" >> "$skipped"
+                echo "::warning::GitHub keeps rejecting $r — skipping permanently"
+                git update-ref -d "$r" 2>/dev/null || true
+                echo "$r" >> mirror.git/skipped_tags.txt
               fi
             done < "$f"
           done
           rm -f /tmp/tagbatch_*
-          if [ -s "$skipped" ]; then
-            count=$(wc -l < "$skipped")
-            echo "::notice::$count tag(s) skipped: $(paste -sd, "$skipped")"
+          sort -u mirror.git/skipped_tags.txt -o mirror.git/skipped_tags.txt
+          count=$(wc -l < mirror.git/skipped_tags.txt)
+          if [ "$count" -gt 0 ]; then
+            echo "::notice::$count tag(s) permanently skipped (GitHub rejects them): $(paste -sd, mirror.git/skipped_tags.txt)"
           fi
 
           # 4) Final prune pass: drop refs deleted upstream (best-effort; the
