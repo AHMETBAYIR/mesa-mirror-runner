@@ -102,16 +102,31 @@ jobs:
             push_with_retry "+$r:$r"
           done
 
-          # 3) Push tags in batches of 100 (952 tags in one request is too much).
+          # 3) Push tags in batches of 20; if a batch keeps failing, fall back
+          #    to tag-by-tag so a single problematic tag can't block the rest.
           git for-each-ref --format='%(refname)' refs/tags > /tmp/tags.txt
-          split -l 100 /tmp/tags.txt /tmp/tagbatch_
+          split -l 20 /tmp/tags.txt /tmp/tagbatch_
+          skipped=/tmp/skipped_tags.txt; : > "$skipped"
           for f in /tmp/tagbatch_*; do
             refs=()
             while read -r r; do refs+=("+$r:$r"); done < "$f"
             echo "Pushing batch $f (${#refs[@]} tags)"
-            push_with_retry "${refs[@]}"
+            if push_with_retry "${refs[@]}"; then continue; fi
+            echo "::warning::Batch $f failed as a group — pushing tags one by one"
+            while read -r r; do
+              if push_with_retry "+$r:$r"; then
+                echo "Pushed $r"
+              else
+                echo "::warning::GitHub keeps rejecting $r — skipping (mirror will be missing this one tag)"
+                echo "$r" >> "$skipped"
+              fi
+            done < "$f"
           done
           rm -f /tmp/tagbatch_*
+          if [ -s "$skipped" ]; then
+            count=$(wc -l < "$skipped")
+            echo "::notice::$count tag(s) skipped: $(paste -sd, "$skipped")"
+          fi
 
           # 4) Final prune pass: drop refs deleted upstream (best-effort; the
           #    next daily run's one-shot push prunes anyway).
