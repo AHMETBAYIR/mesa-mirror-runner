@@ -1,0 +1,54 @@
+name: Mirror mesa daily
+
+on:
+  schedule:
+    # Runs every day at 03:00 UTC
+    - cron: "0 3 * * *"
+  # Allows manual trigger from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Never run two mirror jobs at once (avoids races on cache save)
+concurrency:
+  group: mesa-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Restore cached bare mirror (if any)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: mirror.git
+          key: mesa-mirror-${{ github.run_id }}
+          restore-keys: |
+            mesa-mirror-
+
+      - name: Clone or incrementally update the mirror
+        env:
+          UPSTREAM: https://gitlab.freedesktop.org/mesa/mesa.git
+        run: |
+          set -euo pipefail
+          if [ -d mirror.git ]; then
+            echo "Existing mirror found, fetching incrementally..."
+            git --git-dir=mirror.git remote set-url origin "$UPSTREAM"
+            git --git-dir=mirror.git fetch --prune origin "+refs/*:refs/*"
+          else
+            echo "No cached mirror, doing a fresh full clone (first run only)..."
+            git clone --mirror "$UPSTREAM" mirror.git
+          fi
+          git --git-dir=mirror.git rev-parse HEAD || true
+
+      - name: Push all refs to GitHub
+        run: |
+          set -euo pipefail
+          cd mirror.git
+          # --mirror pushes all refs (branches + tags) and prunes deleted upstream refs;
+          # it also force-updates, so divergent history can never block the sync.
+          git push --mirror \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
