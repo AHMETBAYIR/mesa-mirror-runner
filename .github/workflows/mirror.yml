@@ -46,7 +46,9 @@ jobs:
 
       - name: Push all refs to GitHub
         env:
-          URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          # MIRROR_TOKEN needs the `workflow` scope because mesa's history
+          # contains .github/workflows/*.yml files (GITHUB_TOKEN can't push those).
+          URL: https://x-access-token:${{ secrets.MIRROR_TOKEN }}@github.com/${{ github.repository }}.git
         run: |
           set -euo pipefail
           cd mirror.git
@@ -78,3 +80,18 @@ jobs:
           #    branches) — incremental and small since history already exists.
           git push --mirror "$URL"
           echo "Chunked push complete"
+
+      - name: Disable upstream CI workflows in the mirror
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          # Mesa's workflows (e.g. macos.yml, on: push) would run pointlessly on
+          # every sync. Disable everything except our own mirror.yml.
+          gh api "repos/$REPO/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.path != ".github/workflows/mirror.yml") | .id' \
+            | while read -r id; do
+                echo "Disabling workflow id $id"
+                gh api -X PUT "repos/$REPO/actions/workflows/$id/disable" || true
+              done
