@@ -49,7 +49,8 @@ jobs:
           # that GitHub reserves and rejects on push — keep only branches+tags.
           git --git-dir=mirror.git for-each-ref --format='%(refname)' \
             | awk '!/^refs\/(heads|tags)\//' \
-            | xargs -r -n 20 git --git-dir=mirror.git update-ref -d
+            | sed 's/^/delete /' \
+            | git --git-dir=mirror.git update-ref --stdin || true
           # Tags GitHub persistently rejects (ancient pre-2008 CVS-era tags with
           # broken/unreachable history — GitHub answers HTTP 500 for them). They
           # are dropped locally right after fetch so one-shot --mirror pushes
