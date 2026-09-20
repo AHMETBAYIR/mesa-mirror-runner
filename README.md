@@ -1,15 +1,24 @@
-# Mesa GitHub Mirror
+# Mesa + bionic_translation GitHub Mirrors
 
-Keeps a **full mirror** of https://gitlab.freedesktop.org/mesa/mesa on GitHub
-(`AHMETBAYIR/mesa-mirror`), updated **daily at 03:00 UTC** via GitHub Actions.
+Keeps **full mirrors** of these GitLab repos on GitHub, updated **daily at
+03:00 UTC** via a single GitHub Actions workflow (matrix job):
 
-## Design: two repos
+| Upstream | GitHub mirror |
+|---|---|
+| https://gitlab.freedesktop.org/mesa/mesa | `AHMETBAYIR/mesa-mirror` |
+| https://gitlab.com/android_translation_layer/bionic_translation | `AHMETBAYIR/bionic_translation` |
+
+To add another repo, append an entry to the `matrix.include` list in
+`.github/workflows/mirror.yml` and create the target repo on GitHub.
+
+## Design: runner + mirror repos
 
 - **`mesa-mirror-runner`** (this repo) — a small automation repo that owns the
   scheduled workflow. It never receives mirror pushes, so its `main` (and the
   workflow file on it) is never overwritten.
-- **`mesa-mirror`** — the pure mirror repo. Its default branch becomes Mesa's
-  `main` on every sync; it contains no workflow files of its own.
+- **`mesa-mirror`, `bionic_translation`** — the pure mirror repos. Their default
+  branches become the upstream's default branch on every sync; they contain no
+  workflow files of their own.
 
 This split is required because scheduled GitHub Actions workflows must exist on
 the default branch — impossible in a repo whose default branch is constantly

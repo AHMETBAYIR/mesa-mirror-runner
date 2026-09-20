@@ -1,4 +1,4 @@
-name: Mirror mesa daily
+name: Mirror repos daily
 
 on:
   schedule:
@@ -7,30 +7,40 @@ on:
   # Allows manual trigger from the Actions tab
   workflow_dispatch:
 
-# Never run two mirror jobs at once (avoids races on cache save)
+# Never run two mirror jobs for the same repo at once (avoids races on cache save)
 concurrency:
-  group: mesa-mirror
+  group: mirror-${{ matrix.id }}
   cancel-in-progress: false
-
-env:
-  # The repo that receives the full mirror (default branch there = mesa's main)
-  MIRROR_REPO: AHMETBAYIR/mesa-mirror
-  # Upstream source
-  UPSTREAM: https://gitlab.freedesktop.org/mesa/mesa.git
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: mesa
+            upstream: https://gitlab.freedesktop.org/mesa/mesa.git
+            mirror: AHMETBAYIR/mesa-mirror
+            # Ancient pre-2008 CVS-era tags GitHub permanently rejects (HTTP 500)
+            seed_skipped_tags: true
+          - id: bionic_translation
+            upstream: https://gitlab.com/android_translation_layer/bionic_translation.git
+            mirror: AHMETBAYIR/bionic_translation
+            seed_skipped_tags: false
+    env:
+      UPSTREAM: ${{ matrix.upstream }}
+      MIRROR_REPO: ${{ matrix.mirror }}
     steps:
       - name: Restore cached bare mirror (if any)
         id: cache
         uses: actions/cache/restore@v4
         with:
           path: mirror.git
-          key: mesa-mirror-${{ github.run_id }}
+          key: git-mirror-${{ matrix.id }}-${{ github.run_id }}
           restore-keys: |
-            mesa-mirror-
+            git-mirror-${{ matrix.id }}-
 
       - name: Clone or incrementally update the mirror
         run: |
@@ -51,14 +61,12 @@ jobs:
             | awk '!/^refs\/(heads|tags)\//' \
             | sed 's/^/delete /' \
             | git --git-dir=mirror.git update-ref --stdin || true
-          # Tags GitHub persistently rejects (ancient pre-2008 CVS-era tags with
-          # broken/unreachable history — GitHub answers HTTP 500 for them). They
-          # are dropped locally right after fetch so one-shot --mirror pushes
-          # stay small and daily syncs stay fast.
-          if [ ! -f mirror.git/skipped_tags.txt ]; then
-            # Ancient pre-2008 CVS-era tags GitHub persistently rejects with
-            # HTTP 500; dropped locally after fetch so one-shot --mirror
-            # pushes stay small and daily syncs stay fast.
+
+          # Tags some upstreams carry that GitHub persistently rejects (HTTP 500
+          # on their ancient/broken objects). Dropped locally after fetch so
+          # one-shot --mirror pushes stay small and daily syncs stay fast.
+          if [ "${{ matrix.seed_skipped_tags }}" = "true" ] && [ ! -f mirror.git/skipped_tags.txt ]; then
+            # Mesa: pre-2008 CVS-era tags
             printf '%s\n' \
               refs/tags/R300_DRIVER_0 \
               refs/tags/before_upgrade_03_01_05 \
@@ -128,14 +136,16 @@ jobs:
               refs/tags/vtx-0-2-24112003 \
               > mirror.git/skipped_tags.txt
           fi
-          while read -r t; do
-            git --git-dir=mirror.git update-ref -d "$t" 2>/dev/null || true
-          done < mirror.git/skipped_tags.txt
+          if [ -f mirror.git/skipped_tags.txt ]; then
+            while read -r t; do
+              git --git-dir=mirror.git update-ref -d "$t" 2>/dev/null || true
+            done < mirror.git/skipped_tags.txt
+          fi
 
       - name: Push all refs to GitHub
         env:
-          # MIRROR_TOKEN needs the `workflow` scope because mesa's history
-          # contains .github/workflows/*.yml files (GITHUB_TOKEN can't push those).
+          # MIRROR_TOKEN needs the `workflow` scope because upstream histories
+          # may contain .github/workflows/*.yml files (GITHUB_TOKEN can't push those).
           URL: https://x-access-token:${{ secrets.MIRROR_TOKEN }}@github.com/${{ env.MIRROR_REPO }}.git
         run: |
           set -euo pipefail
@@ -166,7 +176,7 @@ jobs:
           fi
 
           echo "::notice::One-shot push failed — falling back to batched push"
-          echo "(needed only during the first-ever sync; later daily syncs are small)"
+          echo "(needed only during the first-ever sync of very large repos)"
 
           # 1) Push main's history in slices so no single HTTP request is huge.
           mapfile -t commits < <(git rev-list --reverse main)
@@ -193,7 +203,6 @@ jobs:
           #    to tag-by-tag so a single problematic tag can't block the rest.
           git for-each-ref --format='%(refname)' refs/tags > /tmp/tags.txt
           split -l 20 /tmp/tags.txt /tmp/tagbatch_
-          skipped=/tmp/skipped_tags.txt; : > "$skipped"
           for f in /tmp/tagbatch_*; do
             refs=()
             while read -r r; do refs+=("+$r:$r"); done < "$f"
@@ -228,8 +237,8 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ env.MIRROR_REPO }}"
-          # Mesa's workflows (e.g. macos.yml, on: push) would run pointlessly on
-          # every sync. The mirror repo should run no workflows at all.
+          # Upstream workflows (on: push etc.) would run pointlessly on every
+          # sync. The mirror repos should run no workflows at all.
           gh api "repos/$REPO/actions/workflows" --paginate \
             --jq '.workflows[] | .id' \
             | while read -r id; do
@@ -242,4 +251,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: mirror.git
-          key: mesa-mirror-${{ github.run_id }}
+          key: git-mirror-${{ matrix.id }}-${{ github.run_id }}
